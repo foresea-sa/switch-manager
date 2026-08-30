@@ -1,0 +1,18 @@
+services:
+  cisco-switch-manager:
+    build: .
+    container_name: cisco-switch-manager
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      CSM_ADMIN_USER: ${CSM_ADMIN_USER:-admin}
+      CSM_ADMIN_PASSWORD: ${CSM_ADMIN_PASSWORD:-ChangeMeNow!}
+      CSM_MASTER_KEY: ${CSM_MASTER_KEY:-}
+      CSM_STATUS_INTERVAL_SECONDS: ${CSM_STATUS_INTERVAL_SECONDS:-300}
+      CSM_BACKUP_INTERVAL_HOURS: ${CSM_BACKUP_INTERVAL_HOURS:-24}
+      CSM_AVAILABILITY_RETENTION_DAYS: ${CSM_AVAILABILITY_RETENTION_DAYS:-30}
+      CSM_PORT_POLL_INTERVAL_SECONDS: ${CSM_PORT_POLL_INTERVAL_SECONDS:-900}
+      CSM_PORT_HISTORY_RETENTION_DAYS: ${CSM_PORT_HISTORY_RETENTION_DAYS:-30}
+    volumes:
+      - ./data:/app/data
