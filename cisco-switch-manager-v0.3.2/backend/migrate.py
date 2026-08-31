@@ -1,3 +1,4 @@
+import os
 from sqlalchemy import inspect, text
 from .db import engine
 
@@ -28,3 +29,18 @@ def migrate_legacy_db():
         conn.execute(text("UPDATE switches SET monitor_method='snmp' WHERE monitor_method IS NULL OR monitor_method=''"))
         conn.execute(text("UPDATE switches SET snmp_v3_auth_protocol='SHA' WHERE snmp_v3_auth_protocol IS NULL OR snmp_v3_auth_protocol=''"))
         conn.execute(text("UPDATE switches SET snmp_v3_priv_protocol='AES' WHERE snmp_v3_priv_protocol IS NULL OR snmp_v3_priv_protocol=''"))
+        purge_cli = os.getenv("CSM_PURGE_LEGACY_CLI_CREDENTIALS", "true").strip().lower() in {"1", "true", "yes", "on"}
+        if purge_cli and {"username_enc", "password_enc", "secret_enc"}.issubset(columns):
+            conn.execute(text("UPDATE switches SET username_enc='', password_enc='', secret_enc=''"))
+    inspector = inspect(engine)
+    if "audit_logs" in inspector.get_table_names():
+        audit_columns = {c["name"] for c in inspector.get_columns("audit_logs")}
+        audit_additions = {
+            "portal_user": "VARCHAR(120) DEFAULT ''",
+            "operator_user": "VARCHAR(120) DEFAULT ''",
+        }
+        with engine.begin() as conn:
+            for name, ddl in audit_additions.items():
+                if name not in audit_columns:
+                    conn.execute(text(f"ALTER TABLE audit_logs ADD COLUMN {name} {ddl}"))
+

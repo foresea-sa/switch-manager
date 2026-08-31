@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.3.2
+
+- Novo **Gerador de Banner MOTD**.
+- Hostname e IP de gerenciamento sao preenchidos automaticamente a partir do inventario.
+- Campos obrigatorios de e-mail, telefone e mensagem de acesso restrito.
+- Previa individual do banner antes da aplicacao.
+- Aplicacao em lote gera um banner diferente para cada switch, mantendo hostname/IP corretos.
+- Backend reconstrui o banner usando os dados reais do inventario no momento da aplicacao.
+- E-mail e telefone ficam lembrados localmente no navegador para agilizar operacoes futuras.
+- Mantida a Sessao Cisco individual `adm-` e a auditoria da operacao.
+- Porta externa permanece **8086**.
+
+## v0.3.1
+
+- Nova **Sessao Cisco individual** para credenciais `adm-` de cada integrante.
+- Senha e enable secret pessoais permanecem somente em memoria durante a sessao e nao sao persistidos no SQLite.
+- Removidos usuario/senha/enable pessoal dos formularios de cadastro e descoberta de switches.
+- Terminal, comandos CLI, CDP/LLDP, busca de MAC, MOTD, drill-down CLI e backup manual usam a credencial individual ativa.
+- Auditoria passa a registrar `portal_user` e `operator_user`.
+- Migracao adiciona os novos campos de auditoria e pode limpar credenciais CLI legadas por switch.
+- `CSM_PURGE_LEGACY_CLI_CREDENTIALS=true` por padrao.
+- Backup CLI automatico desativado por padrao; pode ser ativado somente com conta tecnica explicitamente configurada.
+- Porta publicada pelo Docker alterada de `8080` para **`8086`**; a porta interna do container permanece `8080`.
+- Novo `.env.example` completo para a v0.3.1.
+- Pacote novo nao distribui uma `data/secret.key` precriada; novas instalacoes geram sua propria chave no primeiro start.
+
 ## v0.3.0
 
 - Mantidos **SNMPv2c + Telnet** como padroes operacionais do cadastro.

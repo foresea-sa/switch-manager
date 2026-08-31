@@ -63,6 +63,8 @@ class AuditLog(Base):
     switch_id: Mapped[int | None] = mapped_column(ForeignKey("switches.id"), nullable=True)
     hostname: Mapped[str] = mapped_column(String(120), default="")
     action: Mapped[str] = mapped_column(String(120))
+    portal_user: Mapped[str] = mapped_column(String(120), default="")
+    operator_user: Mapped[str] = mapped_column(String(120), default="")
     command: Mapped[str] = mapped_column(Text, default="")
     success: Mapped[bool] = mapped_column(Boolean, default=True)
     message: Mapped[str] = mapped_column(Text, default="")

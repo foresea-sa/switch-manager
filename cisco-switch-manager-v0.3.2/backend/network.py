@@ -5,7 +5,6 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from netmiko import ConnectHandler
-from .crypto import decrypt
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 BACKUP_DIR = BASE_DIR / "data" / "backups"
@@ -20,20 +19,26 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
-def device_params(sw):
+def device_params(sw, credentials=None):
     protocol = (sw.protocol or "telnet").lower()
     if protocol not in {"ssh", "telnet"}:
         protocol = "telnet"
     device_type = sw.platform or "cisco_ios"
     if protocol == "telnet" and not device_type.endswith("_telnet"):
         device_type = f"{device_type}_telnet"
+    credentials = credentials or {}
+    username = credentials.get("username") or ""
+    password = credentials.get("password") or ""
+    secret = credentials.get("secret") or ""
+    if not username or not password:
+        raise ValueError("Sessao Cisco necessaria. Informe seu usuario adm- e senha antes de usar Telnet/SSH.")
     return {
         "device_type": device_type,
         "host": sw.management_ip,
         "port": sw.port or (23 if protocol == "telnet" else 22),
-        "username": decrypt(sw.username_enc),
-        "password": decrypt(sw.password_enc),
-        "secret": decrypt(sw.secret_enc),
+        "username": username,
+        "password": password,
+        "secret": secret,
         "conn_timeout": 7,
         "auth_timeout": 8,
         "banner_timeout": 12,
@@ -51,9 +56,9 @@ def tcp_probe(sw, timeout=2.5):
         return False, str(exc)
 
 
-def connect(sw):
-    conn = ConnectHandler(**device_params(sw))
-    if decrypt(sw.secret_enc):
+def connect(sw, credentials=None):
+    conn = ConnectHandler(**device_params(sw, credentials))
+    if (credentials or {}).get("secret"):
         try:
             conn.enable()
         except Exception:
@@ -61,8 +66,8 @@ def connect(sw):
     return conn
 
 
-def run_command(sw, command, use_textfsm=False):
-    conn = connect(sw)
+def run_command(sw, command, use_textfsm=False, credentials=None):
+    conn = connect(sw, credentials)
     try:
         output = conn.send_command(command, use_textfsm=use_textfsm, read_timeout=25)
         return output
@@ -70,8 +75,8 @@ def run_command(sw, command, use_textfsm=False):
         conn.disconnect()
 
 
-def run_config(sw, commands, save_config=False):
-    conn = connect(sw)
+def run_config(sw, commands, save_config=False, credentials=None):
+    conn = connect(sw, credentials)
     try:
         output = conn.send_config_set(commands, read_timeout=40)
         if save_config:
@@ -84,10 +89,39 @@ def run_config(sw, commands, save_config=False):
         conn.disconnect()
 
 
-def apply_motd(sw, banner, save_config=False):
+DEFAULT_RESTRICTED_MESSAGE = (
+    "ACESSO RESTRITO. O acesso a este equipamento e permitido somente a usuarios autorizados. "
+    "Todas as atividades podem ser monitoradas e registradas."
+)
+
+
+def build_motd_banner(sw, email="", phone="", restricted_message=""):
+    """Gera um MOTD individual com identidade do switch e contatos de suporte."""
+    hostname = str(getattr(sw, "hostname", "") or "N/D").strip()
+    management_ip = str(getattr(sw, "management_ip", "") or "N/D").strip()
+    message = str(restricted_message or DEFAULT_RESTRICTED_MESSAGE).strip()
+    email = str(email or "N/D").strip()
+    phone = str(phone or "N/D").strip()
+
+    return "\n".join([
+        "============================================================",
+        "                    ACESSO RESTRITO",
+        "============================================================",
+        f"Equipamento : {hostname}",
+        f"IP          : {management_ip}",
+        "------------------------------------------------------------",
+        message,
+        "------------------------------------------------------------",
+        f"E-mail      : {email}",
+        f"Telefone    : {phone}",
+        "============================================================",
+    ])
+
+
+def apply_motd(sw, banner, save_config=False, credentials=None):
     delimiter = "^"
     safe_banner = banner.replace(delimiter, "-").strip()
-    return run_config(sw, [f"banner motd {delimiter}{safe_banner}{delimiter}"], save_config=save_config)
+    return run_config(sw, [f"banner motd {delimiter}{safe_banner}{delimiter}"], save_config=save_config, credentials=credentials)
 
 
 def normalize_mac(mac):
@@ -98,9 +132,9 @@ def normalize_mac(mac):
     return f"{raw[0:4]}.{raw[4:8]}.{raw[8:12]}"
 
 
-def search_mac_one(sw, mac):
+def search_mac_one(sw, mac, credentials=None):
     normalized = normalize_mac(mac)
-    output = run_command(sw, f"show mac address-table address {normalized}")
+    output = run_command(sw, f"show mac address-table address {normalized}", credentials=credentials)
     interfaces = []
     for line in str(output).splitlines():
         if normalized in line.lower():
@@ -142,14 +176,14 @@ def parse_show_version(text):
     return {"version": version, "model": model, "serial": serial}
 
 
-def get_facts(sw):
-    output = run_command(sw, "show version")
+def get_facts(sw, credentials=None):
+    output = run_command(sw, "show version", credentials=credentials)
     facts = parse_show_version(output)
     facts["raw"] = output
     return facts
 
 
-def get_neighbors(sw, protocol="both"):
+def get_neighbors(sw, protocol="both", credentials=None):
     commands = []
     if protocol in {"cdp", "both"}:
         commands.append(("cdp", "show cdp neighbors detail"))
@@ -158,7 +192,7 @@ def get_neighbors(sw, protocol="both"):
     results = []
     for name, cmd in commands:
         try:
-            results.append({"protocol": name, "output": run_command(sw, cmd)})
+            results.append({"protocol": name, "output": run_command(sw, cmd, credentials=credentials)})
         except Exception as exc:
             results.append({"protocol": name, "output": f"ERROR: {exc}"})
     return results
@@ -184,12 +218,12 @@ def parse_cdp_neighbors(text):
     return neighbors
 
 
-def get_cdp_parsed(sw):
-    return parse_cdp_neighbors(run_command(sw, "show cdp neighbors detail"))
+def get_cdp_parsed(sw, credentials=None):
+    return parse_cdp_neighbors(run_command(sw, "show cdp neighbors detail", credentials=credentials))
 
 
-def get_ports(sw):
-    result = run_command(sw, "show interfaces status", use_textfsm=True)
+def get_ports(sw, credentials=None):
+    result = run_command(sw, "show interfaces status", use_textfsm=True, credentials=credentials)
     if isinstance(result, list):
         ports = []
         for row in result:
@@ -235,8 +269,8 @@ def fallback_parse_ports(text):
     return ports
 
 
-def create_backup(sw):
-    output = run_command(sw, "show running-config")
+def create_backup(sw, credentials=None):
+    output = run_command(sw, "show running-config", credentials=credentials)
     safe_host = re.sub(r"[^A-Za-z0-9_.-]", "_", sw.hostname)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     directory = BACKUP_DIR / safe_host
@@ -288,9 +322,9 @@ def _cleanup_sessions():
             pass
 
 
-def open_terminal(sw):
+def open_terminal(sw, credentials=None, operator_user=""):
     _cleanup_sessions()
-    conn = connect(sw)
+    conn = connect(sw, credentials)
     token = secrets.token_urlsafe(24)
     prompt = ""
     try:
@@ -301,6 +335,7 @@ def open_terminal(sw):
         "conn": conn,
         "switch_id": sw.id,
         "hostname": sw.hostname,
+        "operator_user": operator_user or (credentials or {}).get("username", ""),
         "last_used": datetime.now(timezone.utc).timestamp(),
         "lock": threading.Lock(),
     }
@@ -309,12 +344,14 @@ def open_terminal(sw):
     return {"session_id": token, "prompt": prompt, "hostname": sw.hostname}
 
 
-def terminal_command(session_id, command):
+def terminal_command(session_id, command, expected_operator_user=""):
     _cleanup_sessions()
     with TERMINAL_SESSIONS_LOCK:
         item = TERMINAL_SESSIONS.get(session_id)
     if not item:
         raise KeyError("Terminal session expired or not found")
+    if expected_operator_user and item.get("operator_user") != expected_operator_user:
+        raise PermissionError("Esta sessao de terminal pertence a outro usuario Cisco")
     with item["lock"]:
         item["last_used"] = datetime.now(timezone.utc).timestamp()
         conn = item["conn"]
@@ -326,7 +363,7 @@ def terminal_command(session_id, command):
             read_timeout=20,
             last_read=1.0,
         )
-        return {"output": output, "prompt": conn.find_prompt(), "hostname": item["hostname"]}
+        return {"output": output, "prompt": conn.find_prompt(), "hostname": item["hostname"], "operator_user": item.get("operator_user", "")}
 
 
 def close_terminal(session_id):
@@ -339,6 +376,22 @@ def close_terminal(session_id):
             pass
         return True
     return False
+
+
+def close_terminals_for_operator(operator_user):
+    if not operator_user:
+        return 0
+    closed = []
+    with TERMINAL_SESSIONS_LOCK:
+        for token, item in list(TERMINAL_SESSIONS.items()):
+            if item.get("operator_user") == operator_user:
+                closed.append(TERMINAL_SESSIONS.pop(token))
+    for item in closed:
+        try:
+            item["conn"].disconnect()
+        except Exception:
+            pass
+    return len(closed)
 
 
 def parse_lldp_neighbors(text):
@@ -362,16 +415,16 @@ def parse_lldp_neighbors(text):
     return neighbors
 
 
-def get_topology_neighbors(sw):
+def get_topology_neighbors(sw, credentials=None):
     rows = []
     try:
-        for item in parse_cdp_neighbors(run_command(sw, "show cdp neighbors detail")):
+        for item in parse_cdp_neighbors(run_command(sw, "show cdp neighbors detail", credentials=credentials)):
             item["protocol"] = "cdp"
             rows.append(item)
     except Exception:
         pass
     try:
-        for item in parse_lldp_neighbors(run_command(sw, "show lldp neighbors detail")):
+        for item in parse_lldp_neighbors(run_command(sw, "show lldp neighbors detail", credentials=credentials)):
             item["protocol"] = "lldp"
             rows.append(item)
     except Exception:

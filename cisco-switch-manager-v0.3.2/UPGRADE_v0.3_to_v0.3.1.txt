@@ -1,0 +1,57 @@
+Cisco Switch Manager - Upgrade v0.3.0 -> v0.3.1
+================================================
+
+1. Pare a versao atual:
+
+   docker compose down
+
+2. Faca backup integral do diretorio data/ da v0.3.0:
+
+   cp -a cisco-switch-manager-v0.3.0/data cisco-switch-manager-v0.3.0-data-backup
+
+3. Copie os dados existentes para a v0.3.1:
+
+   cp -a cisco-switch-manager-v0.3.0/data/. cisco-switch-manager-v0.3.1/data/
+
+4. Crie o novo .env:
+
+   cd cisco-switch-manager-v0.3.1
+   cp .env.example .env
+   nano .env
+
+5. Atencao a esta variavel:
+
+   CSM_PURGE_LEGACY_CLI_CREDENTIALS=true
+
+   Com true, o primeiro start limpa usuario, senha e enable secret CLI que
+   estavam salvos dentro de cada switch. Isso e intencional na v0.3.1.
+
+   Para testar primeiro sem apagar esses campos, use temporariamente false.
+   Depois da validacao, altere para true e reinicie.
+
+6. Suba a aplicacao:
+
+   docker compose up -d --build
+
+7. Valide:
+
+   http://IP_DO_SERVIDOR:8086/health
+   http://IP_DO_SERVIDOR:8086
+
+8. Na interface, clique em "Credencial Cisco" e informe:
+
+   Usuario: adm-seuusuario
+   Senha: sua senha individual
+   Enable secret: somente se o ambiente exigir
+
+A senha pessoal nao e salva no SQLite. Ela permanece apenas na memoria do
+backend durante a sessao operacional e e removida no logout/expiracao.
+
+SNMP continua usando a credencial tecnica cadastrada em cada switch.
+
+Backup automatico por CLI fica desativado por padrao. Se houver conta tecnica
+exclusiva para esse fim, configure CSM_AUTOMATIC_CLI_BACKUP_ENABLED=true e as
+variaveis CSM_BACKUP_CLI_USER/CSM_BACKUP_CLI_PASSWORD/CSM_BACKUP_CLI_SECRET.
+
+IMPORTANTE: preserve data/secret.key. Ele continua necessario para as
+credenciais SNMP criptografadas existentes.

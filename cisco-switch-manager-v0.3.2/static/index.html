@@ -23,13 +23,13 @@
       <button class="nav-btn" data-view="shortcuts">Atalhos</button>
       <button class="nav-btn" data-view="audit">Auditoria</button>
     </nav>
-    <div class="sidebar-foot">v0.3.0 · SNMPv2/v3 · Telnet/SSH</div>
+    <div class="sidebar-foot">v0.3.2 · SNMPv2/v3 · Telnet/SSH · credencial individual</div>
   </aside>
 
   <main class="content">
     <header class="topbar">
       <div><h1 id="pageTitle">Dashboard</h1><p id="pageSubtitle">Visão geral do parque Cisco</p></div>
-      <div class="top-actions"><span id="globalMessage" class="muted"></span><button id="refreshStatusBtn" class="btn secondary">Atualizar status</button></div>
+      <div class="top-actions"><span id="globalMessage" class="muted"></span><span id="operatorStatus" class="operator-status inactive">Cisco: não autenticado</span><button id="operatorCredentialBtn" class="btn secondary">Credencial Cisco</button><button id="refreshStatusBtn" class="btn secondary">Atualizar status</button></div>
     </header>
 
     <section class="view active" id="view-dashboard">
@@ -49,9 +49,7 @@
           <label>Plataforma<select id="platform"><option value="cisco_ios">Cisco IOS / IOS-XE</option></select></label>
           <label>Terminal<select id="protocol"><option value="telnet" selected>Telnet</option><option value="ssh">SSH</option></select></label>
           <label>Porta CLI<input id="port" type="number" value="23" min="1" max="65535"></label>
-          <label>Usuário CLI<input id="username" autocomplete="off"></label>
-          <label>Senha CLI<input id="password" type="password" autocomplete="new-password"></label>
-          <label>Enable secret<input id="secret" type="password" autocomplete="new-password"></label>
+          <div class="info-box span-2"><strong>Credencial CLI individual</strong><span>Usuário e senha Telnet/SSH não são gravados no switch. Cada integrante ativa sua sessão <code>adm-</code> no topo da aplicação antes das operações CLI.</span></div>
           <label>SNMP<select id="snmpVersion"><option value="v2c" selected>SNMPv2c</option><option value="v3">SNMPv3</option></select></label>
           <label>Porta SNMP<input id="snmpPort" type="number" value="161" min="1" max="65535"></label>
           <label id="communityWrap">Community SNMPv2c<input id="snmpCommunity" type="password" autocomplete="new-password"></label>
@@ -81,7 +79,7 @@
             <label>Auth key<input id="discoverV3AuthKey" type="password"></label><label>Priv<select id="discoverV3PrivProtocol"><option>AES</option><option>DES</option><option>NONE</option></select></label><label>Priv key<input id="discoverV3PrivKey" type="password"></label>
           </div>
           <label>CLI<select id="discoverProtocol"><option value="telnet">Telnet</option><option value="ssh">SSH</option></select></label>
-          <label>Usuário CLI<input id="discoverUsername"></label><label>Senha CLI<input id="discoverPassword" type="password"></label><label>Enable<input id="discoverSecret" type="password"></label>
+          <div class="info-box"><strong>CLI sem credencial armazenada</strong><span>O cadastro descoberto guarda apenas protocolo e porta. A autenticação Telnet/SSH usa a sessão individual do integrante.</span></div>
           <label class="check span-2"><input id="discoverAdd" type="checkbox"> Cadastrar automaticamente os switches encontrados</label>
           <div class="form-actions span-2"><button class="btn primary" type="submit">Iniciar descoberta</button></div>
         </form>
@@ -122,17 +120,44 @@
     </section>
 
     <section class="view" id="view-motd">
-      <div class="panel"><div class="panel-head"><div><h2>Banner corporativo MOTD</h2><p>Aplicação em um ou vários switches</p></div></div><form id="motdForm"><label>Switches<select id="motdSwitches" multiple size="8"></select></label><label>Banner<textarea id="motdText" rows="8" required placeholder="ACESSO RESTRITO..."></textarea></label><label class="check"><input id="saveConfig" type="checkbox"> Salvar configuração após aplicar</label><button class="btn primary">Aplicar banner</button></form></div><div id="motdResults"></div>
+      <div class="panel">
+        <div class="panel-head"><div><h2>Gerador de Banner corporativo MOTD</h2><p>O hostname e o IP são preenchidos automaticamente para cada switch selecionado.</p></div></div>
+        <form id="motdForm" class="form-grid">
+          <label class="span-2">Switches
+            <select id="motdSwitches" multiple size="8" required></select>
+            <span class="field-help">Selecione um ou vários equipamentos. Cada switch receberá um banner individual com seu próprio hostname e IP.</span>
+          </label>
+          <label>E-mail de contato
+            <input id="motdEmail" type="email" required placeholder="Ex.: suporte.rede@empresa.com">
+          </label>
+          <label>Telefone de contato
+            <input id="motdPhone" type="text" required maxlength="80" placeholder="Ex.: +55 22 0000-0000">
+          </label>
+          <label class="span-2">Mensagem de acesso restrito
+            <textarea id="motdMessage" rows="5" required maxlength="2000">ACESSO RESTRITO. O acesso a este equipamento é permitido somente a usuários autorizados. Todas as atividades podem ser monitoradas e registradas.</textarea>
+          </label>
+          <div class="span-2 motd-actions">
+            <button id="motdGenerateBtn" class="btn secondary" type="button">Gerar / atualizar prévia</button>
+            <label class="check"><input id="saveConfig" type="checkbox"> Salvar configuração após aplicar</label>
+            <button class="btn primary" type="submit">Aplicar banner</button>
+          </div>
+        </form>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><div><h2>Prévia</h2><p>Conteúdo que será enviado ao comando <code>banner motd</code>.</p></div><span id="motdPreviewCount" class="badge">0 banners</span></div>
+        <div id="motdPreview" class="motd-preview"><p class="muted">Selecione pelo menos um switch para gerar a prévia.</p></div>
+      </div>
+      <div id="motdResults"></div>
     </section>
 
     <section class="view" id="view-terminal">
-      <div class="panel"><div class="panel-head"><div><h2>Terminal</h2><p>Sessão persistente Telnet/SSH pelo backend</p></div><div class="terminal-controls"><select id="terminalSwitch"></select><button id="terminalConnect" class="btn primary">Conectar</button><button id="terminalDisconnect" class="btn danger" disabled>Desconectar</button></div></div><div id="shortcutBar" class="chips"></div><pre id="terminalOutput" class="terminal-output">Cisco Switch Manager v0.3.0
+      <div class="panel"><div class="panel-head"><div><h2>Terminal</h2><p>Sessão persistente Telnet/SSH pelo backend</p></div><div class="terminal-controls"><select id="terminalSwitch"></select><button id="terminalConnect" class="btn primary">Conectar</button><button id="terminalDisconnect" class="btn danger" disabled>Desconectar</button></div></div><div id="shortcutBar" class="chips"></div><pre id="terminalOutput" class="terminal-output">Cisco Switch Manager v0.3.2
 Selecione um switch e clique em Conectar.
 </pre><form id="terminalForm" class="terminal-form"><input id="terminalCommand" autocomplete="off" placeholder="show interfaces status"><button class="btn primary">Executar</button></form><div class="actions"><button id="cdpBtn" class="btn secondary">CDP</button><button id="lldpBtn" class="btn secondary">LLDP</button><button id="bothBtn" class="btn secondary">CDP + LLDP</button></div><div id="neighborResults"></div></div>
     </section>
 
     <section class="view" id="view-backups">
-      <div class="panel"><div class="panel-head"><div><h2>Backups de running-config</h2><p>Manual e automático pelo intervalo configurado no servidor</p></div><div><select id="backupSwitch" class="select-wide"></select> <button id="createBackupBtn" class="btn primary">Gerar backup agora</button></div></div><div id="backupList"></div></div>
+      <div class="panel"><div class="panel-head"><div><h2>Backups de running-config</h2><p>Backup manual usa sua sessão Cisco. O automático só funciona se uma conta técnica de serviço for configurada explicitamente.</p></div><div><select id="backupSwitch" class="select-wide"></select> <button id="createBackupBtn" class="btn primary">Gerar backup agora</button></div></div><div id="backupList"></div></div>
       <div class="panel"><div class="panel-head"><div><h2>Comparar configurações</h2><p>Diff entre dois backups do mesmo switch</p></div></div><div class="inline-form"><select id="diffOld"></select><select id="diffNew"></select><button id="compareBackupsBtn" class="btn secondary">Comparar</button></div><pre id="backupDiff" class="diff-output">Selecione dois backups.</pre></div>
     </section>
 
@@ -141,10 +166,27 @@ Selecione um switch e clique em Conectar.
     </section>
 
     <section class="view" id="view-audit">
-      <div class="panel"><div class="panel-head"><div><h2>Auditoria</h2><p>Comandos e alterações executadas pelo sistema</p></div><button id="reloadAudit" class="btn secondary">Atualizar</button></div><div class="table-wrap"><table><thead><tr><th>Data</th><th>Switch</th><th>Ação</th><th>Comando</th><th>Resultado</th></tr></thead><tbody id="auditTable"></tbody></table></div></div>
+      <div class="panel"><div class="panel-head"><div><h2>Auditoria</h2><p>Comandos e alterações executadas pelo sistema</p></div><button id="reloadAudit" class="btn secondary">Atualizar</button></div><div class="table-wrap"><table><thead><tr><th>Data</th><th>Usuário Cisco</th><th>Switch</th><th>Ação</th><th>Comando</th><th>Resultado</th></tr></thead><tbody id="auditTable"></tbody></table></div></div>
     </section>
   </main>
 </div>
+<dialog id="operatorDialog" class="operator-dialog">
+  <form id="operatorForm" method="dialog">
+    <div class="dialog-head">
+      <div><h2>Credencial Cisco</h2><p>Use seu usuário administrativo individual para Telnet/SSH.</p></div>
+      <button id="operatorDialogClose" class="icon-btn" type="button" aria-label="Fechar">×</button>
+    </div>
+    <label>Usuário Cisco<input id="operatorUsername" required autocomplete="username" placeholder="adm-seunome"></label>
+    <label>Senha<input id="operatorPassword" type="password" required autocomplete="current-password"></label>
+    <label>Enable secret <span class="muted">(opcional)</span><input id="operatorSecret" type="password" autocomplete="current-password"></label>
+    <div class="security-note">A senha é mantida somente na memória do backend durante a sessão e não é gravada no SQLite. Em produção, use HTTPS.</div>
+    <div class="dialog-actions">
+      <button id="operatorLogoutBtn" class="btn danger hidden" type="button">Encerrar sessão Cisco</button>
+      <button class="btn primary" type="submit">Ativar sessão</button>
+    </div>
+  </form>
+</dialog>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

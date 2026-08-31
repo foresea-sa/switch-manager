@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,13 +20,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .crypto import encrypt
+from .operator_session import create_session as create_operator_session, delete_session as delete_operator_session, get_session as get_operator_session, SESSION_TTL_SECONDS
 from .db import Base, SessionLocal, engine, get_db
 from .migrate import migrate_legacy_db
 from .models import AuditLog, AvailabilitySample, InterfaceSample, Shortcut, Switch
 from .network import (
     apply_motd,
+    build_motd_banner,
     backup_path,
     close_terminal,
+    close_terminals_for_operator,
     create_backup,
     get_facts,
     get_neighbors,
@@ -39,7 +42,7 @@ from .network import (
     tcp_probe,
     terminal_command,
 )
-from .schemas import BannerRequest, CommandRequest, DiscoveryRequest, MacSearchRequest, ShortcutCreate, SwitchCreate, SwitchUpdate
+from .schemas import BannerRequest, CommandRequest, DiscoveryRequest, MacSearchRequest, OperatorSessionRequest, ShortcutCreate, SwitchCreate, SwitchUpdate
 from .snmp import snmp_health, snmp_interfaces, snmp_metrics
 from .port_detail import get_port_detail, validate_interface
 
@@ -52,6 +55,14 @@ BACKUP_INTERVAL_HOURS = max(1, int(os.getenv("CSM_BACKUP_INTERVAL_HOURS", "24"))
 AVAILABILITY_RETENTION_DAYS = max(7, int(os.getenv("CSM_AVAILABILITY_RETENTION_DAYS", "30")))
 PORT_POLL_INTERVAL = max(300, int(os.getenv("CSM_PORT_POLL_INTERVAL_SECONDS", "900")))
 PORT_HISTORY_RETENTION_DAYS = max(7, int(os.getenv("CSM_PORT_HISTORY_RETENTION_DAYS", "30")))
+OPERATOR_COOKIE_NAME = "csm_operator_session"
+OPERATOR_COOKIE_SECURE = os.getenv("CSM_SESSION_COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes", "on"}
+AUTOMATIC_CLI_BACKUP_ENABLED = os.getenv("CSM_AUTOMATIC_CLI_BACKUP_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+BACKUP_CLI_CREDENTIALS = {
+    "username": os.getenv("CSM_BACKUP_CLI_USER", "").strip(),
+    "password": os.getenv("CSM_BACKUP_CLI_PASSWORD", ""),
+    "secret": os.getenv("CSM_BACKUP_CLI_SECRET", ""),
+}
 
 Base.metadata.create_all(bind=engine)
 migrate_legacy_db()
@@ -123,16 +134,33 @@ def sw_public(sw):
     }
 
 
-def audit(db, sw, action, command="", success=True, message=""):
+def audit(db, sw, action, command="", success=True, message="", portal_user="", operator_user=""):
     db.add(AuditLog(
         switch_id=sw.id if sw else None,
         hostname=sw.hostname if sw else "",
         action=action,
+        portal_user=portal_user or "",
+        operator_user=operator_user or "",
         command=command,
         success=success,
         message=str(message)[:8000],
     ))
     db.commit()
+
+
+def operator_context(request: Request, required=True):
+    token = request.cookies.get(OPERATOR_COOKIE_NAME)
+    session = get_operator_session(token)
+    if not session and required:
+        raise HTTPException(428, "Sessao Cisco necessaria. Ative sua credencial adm- antes de usar Telnet/SSH.")
+    return session
+
+
+def audit_identity(request: Request, operator=None):
+    return {
+        "portal_user": getattr(request.state, "portal_user", ""),
+        "operator_user": (operator or {}).get("username", ""),
+    }
 
 
 async def _probe_one(sw):
@@ -267,10 +295,10 @@ async def backup_scheduler_loop():
             switches = db.scalars(select(Switch).order_by(Switch.hostname)).all()
             for sw in switches:
                 try:
-                    await asyncio.to_thread(create_backup, sw)
-                    audit(db, sw, "backup.scheduled", command="show running-config", success=True)
+                    await asyncio.to_thread(create_backup, sw, BACKUP_CLI_CREDENTIALS)
+                    audit(db, sw, "backup.scheduled", command="show running-config", success=True, operator_user=f"service:{BACKUP_CLI_CREDENTIALS['username']}")
                 except Exception as exc:
-                    audit(db, sw, "backup.scheduled", command="show running-config", success=False, message=exc)
+                    audit(db, sw, "backup.scheduled", command="show running-config", success=False, message=exc, operator_user=f"service:{BACKUP_CLI_CREDENTIALS['username']}")
         finally:
             db.close()
         await asyncio.sleep(BACKUP_INTERVAL_HOURS * 3600)
@@ -278,14 +306,16 @@ async def backup_scheduler_loop():
 
 @asynccontextmanager
 async def lifespan(app):
-    tasks = [asyncio.create_task(status_monitor_loop()), asyncio.create_task(backup_scheduler_loop()), asyncio.create_task(port_monitor_loop())]
+    tasks = [asyncio.create_task(status_monitor_loop()), asyncio.create_task(port_monitor_loop())]
+    if AUTOMATIC_CLI_BACKUP_ENABLED and BACKUP_CLI_CREDENTIALS["username"] and BACKUP_CLI_CREDENTIALS["password"]:
+        tasks.append(asyncio.create_task(backup_scheduler_loop()))
     yield
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
-app = FastAPI(title="Cisco Switch Manager", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Cisco Switch Manager", version="0.3.2", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -303,6 +333,7 @@ async def basic_auth(request: Request, call_next):
             pass
     if not ok:
         return JSONResponse({"detail": "Authentication required"}, status_code=401, headers={"WWW-Authenticate": "Basic realm=CSM"})
+    request.state.portal_user = user
     return await call_next(request)
 
 
@@ -311,7 +342,42 @@ app.add_middleware(CORSMiddleware, allow_origins=[], allow_credentials=True, all
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "0.3.0", "status_interval_seconds": STATUS_INTERVAL, "backup_interval_hours": BACKUP_INTERVAL_HOURS, "port_poll_interval_seconds": PORT_POLL_INTERVAL, "port_history_retention_days": PORT_HISTORY_RETENTION_DAYS}
+    return {"status": "ok", "version": "0.3.2", "status_interval_seconds": STATUS_INTERVAL, "backup_interval_hours": BACKUP_INTERVAL_HOURS, "automatic_cli_backup_enabled": AUTOMATIC_CLI_BACKUP_ENABLED, "operator_session_minutes": SESSION_TTL_SECONDS // 60, "port_poll_interval_seconds": PORT_POLL_INTERVAL, "port_history_retention_days": PORT_HISTORY_RETENTION_DAYS}
+
+
+@app.get("/api/operator-session")
+def operator_session_status(request: Request):
+    session = operator_context(request, required=False)
+    if not session:
+        return {"active": False, "session_minutes": SESSION_TTL_SECONDS // 60}
+    return session["public"]
+
+
+@app.post("/api/operator-session")
+def operator_session_create(payload: OperatorSessionRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    try:
+        token, public = create_operator_session(payload.username, payload.password, payload.secret)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    response.set_cookie(
+        OPERATOR_COOKIE_NAME, token, max_age=SESSION_TTL_SECONDS, httponly=True,
+        secure=OPERATOR_COOKIE_SECURE, samesite="strict", path="/",
+    )
+    audit(db, None, "operator.session.open", portal_user=getattr(request.state, "portal_user", ""), operator_user=public["username"])
+    return public
+
+
+@app.delete("/api/operator-session")
+def operator_session_delete(request: Request, response: Response, db: Session = Depends(get_db)):
+    token = request.cookies.get(OPERATOR_COOKIE_NAME)
+    session = get_operator_session(token, touch=False)
+    operator_user = (session or {}).get("username", "")
+    if operator_user:
+        close_terminals_for_operator(operator_user)
+    delete_operator_session(token)
+    response.delete_cookie(OPERATOR_COOKIE_NAME, path="/")
+    audit(db, None, "operator.session.close", portal_user=getattr(request.state, "portal_user", ""), operator_user=operator_user)
+    return {"ok": True}
 
 
 @app.get("/api/dashboard")
@@ -351,7 +417,6 @@ def _validate_protocols(protocol, snmp_version):
 
 def _apply_secrets(sw, data, creating=False):
     plain_to_enc = {
-        "username": "username_enc", "password": "password_enc", "secret": "secret_enc",
         "snmp_community": "snmp_community_enc", "snmp_v3_user": "snmp_v3_user_enc",
         "snmp_v3_auth_key": "snmp_v3_auth_key_enc", "snmp_v3_priv_key": "snmp_v3_priv_key_enc",
     }
@@ -426,30 +491,34 @@ async def refresh_status(db: Session = Depends(get_db)):
 
 
 @app.post("/api/switches/{switch_id}/test")
-async def test_switch(switch_id: int, db: Session = Depends(get_db)):
+async def test_switch(switch_id: int, request: Request, db: Session = Depends(get_db)):
     sw = db.get(Switch, switch_id)
     if not sw:
         raise HTTPException(404, "Switch not found")
+    operator = operator_context(request, required=False)
     result = {"cli": None, "snmp": None, "errors": []}
-    if sw.username_enc and sw.password_enc:
+    if operator:
         try:
-            facts = await asyncio.to_thread(get_facts, sw)
+            facts = await asyncio.to_thread(get_facts, sw, operator)
             sw.model = facts.get("model") or sw.model; sw.serial = facts.get("serial") or sw.serial; sw.ios_version = facts.get("version") or sw.ios_version
             result["cli"] = {k: v for k, v in facts.items() if k != "raw"}
         except Exception as exc:
             result["errors"].append(f"CLI: {exc}")
+    elif not snmp_configured(sw):
+        operator_context(request, required=True)
     if snmp_configured(sw):
         try:
             result["snmp"] = await snmp_health(sw)
         except Exception as exc:
             result["errors"].append(f"SNMP: {exc}")
+    identity = audit_identity(request, operator)
     if result["cli"] or result["snmp"]:
         sw.is_online = True; sw.last_seen = datetime.now(timezone.utc); sw.last_status_source = snmp_label(sw) if result["snmp"] else (sw.protocol or "telnet")
         db.add(AvailabilitySample(switch_id=sw.id, online=True, source=sw.last_status_source)); db.commit()
-        audit(db, sw, "connection.test", command=f"{snmp_label(sw)} + {sw.protocol}")
-        return {"ok": True, **result, "facts": result["cli"] or {}}
+        audit(db, sw, "connection.test", command=f"{snmp_label(sw)} + {sw.protocol}", **identity)
+        return {"ok": True, **result, "facts": result["cli"] or {}, "operator_session": bool(operator)}
     sw.is_online = False; db.add(AvailabilitySample(switch_id=sw.id, online=False, source="")); db.commit()
-    audit(db, sw, "connection.test", success=False, message="; ".join(result["errors"]))
+    audit(db, sw, "connection.test", success=False, message="; ".join(result["errors"]), **identity)
     raise HTTPException(502, "; ".join(result["errors"]) or "Connection failed")
 
 
@@ -470,7 +539,7 @@ async def metrics(switch_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/api/switches/{switch_id}/ports")
-async def ports(switch_id: int, db: Session = Depends(get_db)):
+async def ports(switch_id: int, request: Request, db: Session = Depends(get_db)):
     sw = db.get(Switch, switch_id)
     if not sw:
         raise HTTPException(404, "Switch not found")
@@ -482,15 +551,17 @@ async def ports(switch_id: int, db: Session = Depends(get_db)):
                 source = snmp_label(sw)
         except Exception as exc:
             snmp_error = str(exc)
+    operator = None
     if not result:
+        operator = operator_context(request, required=True)
         try:
-            result = await asyncio.to_thread(get_ports, sw)
+            result = await asyncio.to_thread(get_ports, sw, operator)
         except Exception as exc:
             message = f"SNMP: {snmp_error}; CLI: {exc}" if snmp_error else str(exc)
-            audit(db, sw, "ports.view", success=False, message=message); raise HTTPException(502, message)
+            audit(db, sw, "ports.view", success=False, message=message, **audit_identity(request, operator)); raise HTTPException(502, message)
     summary = Counter((p.get("status") or "unknown") for p in result)
     error_ports = sum(1 for p in result if str(p.get("in_errors") or "0").isdigit() and str(p.get("out_errors") or "0").isdigit() and (int(str(p.get("in_errors") or "0")) + int(str(p.get("out_errors") or "0")) > 0))
-    audit(db, sw, "ports.view", command=f"source={source}")
+    audit(db, sw, "ports.view", command=f"source={source}", **audit_identity(request, operator))
     return {"switch": sw_public(sw), "source": source, "snmp_fallback_error": snmp_error, "summary": dict(summary), "error_ports": error_ports, "ports": result}
 
 
@@ -529,19 +600,21 @@ def port_history(switch_id: int, port: str, hours: int = 168, db: Session = Depe
 
 
 @app.get("/api/switches/{switch_id}/port-detail")
-async def port_detail(switch_id: int, port: str, db: Session = Depends(get_db)):
+async def port_detail(switch_id: int, port: str, request: Request, db: Session = Depends(get_db)):
     sw = db.get(Switch, switch_id)
     if not sw:
         raise HTTPException(404, "Switch not found")
+    operator = operator_context(request, required=True)
+    identity = audit_identity(request, operator)
     try:
         port = validate_interface(port)
-        detail = await asyncio.to_thread(get_port_detail, sw, port)
-        audit(db, sw, "port.detail", command=f"interface {port}")
+        detail = await asyncio.to_thread(get_port_detail, sw, port, operator)
+        audit(db, sw, "port.detail", command=f"interface {port}", **identity)
         return {"switch": sw_public(sw), **detail}
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
-        audit(db, sw, "port.detail", command=f"interface {port}", success=False, message=exc)
+        audit(db, sw, "port.detail", command=f"interface {port}", success=False, message=exc, **identity)
         raise HTTPException(502, str(exc))
 
 
@@ -558,34 +631,39 @@ def availability(switch_id: int, hours: int = 168, db: Session = Depends(get_db)
 
 
 @app.post("/api/switches/{switch_id}/command")
-async def command(switch_id: int, payload: CommandRequest, db: Session = Depends(get_db)):
+async def command(switch_id: int, payload: CommandRequest, request: Request, db: Session = Depends(get_db)):
     sw = db.get(Switch, switch_id)
     if not sw: raise HTTPException(404, "Switch not found")
+    operator = operator_context(request, required=True); identity = audit_identity(request, operator)
     cmd = payload.command.strip()
     try:
-        output = await asyncio.to_thread(run_command, sw, cmd); audit(db, sw, "terminal.command", command=cmd); return {"output": output}
+        output = await asyncio.to_thread(run_command, sw, cmd, False, operator); audit(db, sw, "terminal.command", command=cmd, **identity); return {"output": output}
     except Exception as exc:
-        audit(db, sw, "terminal.command", command=cmd, success=False, message=exc); raise HTTPException(502, str(exc))
+        audit(db, sw, "terminal.command", command=cmd, success=False, message=exc, **identity); raise HTTPException(502, str(exc))
 
 
 @app.post("/api/switches/{switch_id}/terminal/open")
-async def terminal_open(switch_id: int, db: Session = Depends(get_db)):
+async def terminal_open(switch_id: int, request: Request, db: Session = Depends(get_db)):
     sw = db.get(Switch, switch_id)
     if not sw: raise HTTPException(404, "Switch not found")
+    operator = operator_context(request, required=True); identity = audit_identity(request, operator)
     try:
-        result = await asyncio.to_thread(open_terminal, sw); audit(db, sw, "terminal.open", command=sw.protocol or "telnet"); return result
+        result = await asyncio.to_thread(open_terminal, sw, operator, operator["username"]); audit(db, sw, "terminal.open", command=sw.protocol or "telnet", **identity); return result
     except Exception as exc:
-        audit(db, sw, "terminal.open", success=False, message=exc); raise HTTPException(502, str(exc))
+        audit(db, sw, "terminal.open", success=False, message=exc, **identity); raise HTTPException(502, str(exc))
 
 
 @app.post("/api/terminal/{session_id}/command")
-async def terminal_session_command(session_id: str, payload: CommandRequest, db: Session = Depends(get_db)):
+async def terminal_session_command(session_id: str, payload: CommandRequest, request: Request, db: Session = Depends(get_db)):
+    operator = operator_context(request, required=True)
     try:
-        result = await asyncio.to_thread(terminal_command, session_id, payload.command)
+        result = await asyncio.to_thread(terminal_command, session_id, payload.command, operator["username"])
         sw = db.scalar(select(Switch).where(Switch.hostname == result.get("hostname")))
-        audit(db, sw, "terminal.session.command", command=payload.command); return result
+        audit(db, sw, "terminal.session.command", command=payload.command, **audit_identity(request, operator)); return result
     except KeyError as exc:
         raise HTTPException(404, str(exc))
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
     except Exception as exc:
         raise HTTPException(502, str(exc))
 
@@ -596,24 +674,29 @@ async def terminal_close(session_id: str):
 
 
 @app.get("/api/switches/{switch_id}/neighbors")
-async def neighbors(switch_id: int, protocol: str = "both", db: Session = Depends(get_db)):
+async def neighbors(switch_id: int, request: Request, protocol: str = "both", db: Session = Depends(get_db)):
     if protocol not in {"cdp", "lldp", "both"}: raise HTTPException(400, "protocol must be cdp, lldp or both")
     sw = db.get(Switch, switch_id)
     if not sw: raise HTTPException(404, "Switch not found")
-    result = await asyncio.to_thread(get_neighbors, sw, protocol); audit(db, sw, "neighbors.view", command=protocol); return result
+    operator = operator_context(request, required=True)
+    result = await asyncio.to_thread(get_neighbors, sw, protocol, operator); audit(db, sw, "neighbors.view", command=protocol, **audit_identity(request, operator)); return result
 
 
 @app.get("/api/topology")
-async def topology(db: Session = Depends(get_db)):
+async def topology(request: Request, db: Session = Depends(get_db)):
+    operator = operator_context(request, required=True)
     switches = db.scalars(select(Switch).order_by(Switch.site, Switch.hostname)).all()
     nodes = [{"id": s.hostname, "switch_id": s.id, "hostname": s.hostname, "ip": s.management_ip, "site": s.site, "known": True, "online": s.is_online} for s in switches]
     node_ids = {n["id"] for n in nodes}; external, edges = {}, []
     sem = asyncio.Semaphore(8)
     async def collect(sw):
         async with sem:
-            try: return sw, await asyncio.to_thread(get_topology_neighbors, sw), None
+            try: return sw, await asyncio.to_thread(get_topology_neighbors, sw, operator), None
             except Exception as exc: return sw, [], str(exc)
     results = await asyncio.gather(*(collect(sw) for sw in switches)) if switches else []
+    identity = audit_identity(request, operator)
+    for sw, _, error in results:
+        audit(db, sw, "topology.view", command="cdp/lldp", success=not bool(error), message=error or "", **identity)
     known_lower = {s.hostname.lower(): s.hostname for s in switches}; edge_keys = set()
     for sw, rows, _ in results:
         for n in rows:
@@ -661,7 +744,7 @@ async def discovery_scan(payload: DiscoveryRequest, db: Session = Depends(get_db
             while hostname.lower() in existing_hosts:
                 hostname = f"{base[:110]}-{suffix}"; suffix += 1
             sw = Switch(hostname=hostname, management_ip=item["ip"], site=payload.site or "Descoberta", platform="cisco_ios", protocol=protocol,
-                port=payload.cli_port or (23 if protocol == "telnet" else 22), username_enc=encrypt(payload.username), password_enc=encrypt(payload.password), secret_enc=encrypt(payload.secret),
+                port=payload.cli_port or (23 if protocol == "telnet" else 22),
                 snmp_version=snmp_version, snmp_port=payload.snmp_port or 161, snmp_community_enc=template["snmp_community_enc"], snmp_v3_user_enc=template["snmp_v3_user_enc"],
                 snmp_v3_auth_key_enc=template["snmp_v3_auth_key_enc"], snmp_v3_priv_key_enc=template["snmp_v3_priv_key_enc"], snmp_v3_auth_protocol=template["snmp_v3_auth_protocol"],
                 snmp_v3_priv_protocol=template["snmp_v3_priv_protocol"], monitor_method="snmp", is_online=True, last_seen=datetime.now(timezone.utc), last_status_source=snmp_label(SimpleNamespace(snmp_version=snmp_version)))
@@ -671,7 +754,8 @@ async def discovery_scan(payload: DiscoveryRequest, db: Session = Depends(get_db
 
 
 @app.post("/api/mac/search")
-async def mac_search(payload: MacSearchRequest, db: Session = Depends(get_db)):
+async def mac_search(payload: MacSearchRequest, request: Request, db: Session = Depends(get_db)):
+    operator = operator_context(request, required=True)
     query = select(Switch)
     if payload.switch_ids: query = query.where(Switch.id.in_(payload.switch_ids))
     switches = db.scalars(query.order_by(Switch.site, Switch.hostname)).all()
@@ -679,30 +763,50 @@ async def mac_search(payload: MacSearchRequest, db: Session = Depends(get_db)):
     sem = asyncio.Semaphore(10)
     async def lookup(sw):
         async with sem:
-            try: return await asyncio.to_thread(search_mac_one, sw, payload.mac)
+            try: return await asyncio.to_thread(search_mac_one, sw, payload.mac, operator)
             except Exception as exc: return {"switch_id": sw.id, "hostname": sw.hostname, "site": sw.site, "management_ip": sw.management_ip, "found": False, "interfaces": [], "error": str(exc)}
-    results = await asyncio.gather(*(lookup(sw) for sw in switches)); return {"mac": payload.mac, "found_count": sum(1 for r in results if r.get("found")), "results": results}
+    results = await asyncio.gather(*(lookup(sw) for sw in switches))
+    identity = audit_identity(request, operator)
+    by_id = {sw.id: sw for sw in switches}
+    for result in results:
+        sw = by_id.get(result.get("switch_id"))
+        audit(db, sw, "mac.search", command=payload.mac, success=not bool(result.get("error")), message=result.get("error", ""), **identity)
+    return {"mac": payload.mac, "found_count": sum(1 for r in results if r.get("found")), "results": results}
 
 
 @app.post("/api/banner/motd")
-async def banner_motd(payload: BannerRequest, db: Session = Depends(get_db)):
+async def banner_motd(payload: BannerRequest, request: Request, db: Session = Depends(get_db)):
+    operator = operator_context(request, required=True); identity = audit_identity(request, operator)
+    legacy_banner = payload.banner.strip() if payload.banner and payload.banner.strip() else None
+    if not legacy_banner:
+        if not payload.email.strip() or not payload.phone.strip() or not payload.restricted_message.strip():
+            raise HTTPException(422, "E-mail, telefone e mensagem de acesso restrito sao obrigatorios")
     switches = db.scalars(select(Switch).where(Switch.id.in_(payload.switch_ids))).all(); results = []
     for sw in switches:
         try:
-            output = await asyncio.to_thread(apply_motd, sw, payload.banner, payload.save_config); results.append({"switch_id": sw.id, "hostname": sw.hostname, "success": True, "output": output}); audit(db, sw, "banner.motd", command="banner motd")
+            # v0.3.2: gera um banner proprio para cada switch. O campo banner permanece
+            # aceito para compatibilidade com chamadas antigas da API.
+            banner_text = legacy_banner or build_motd_banner(
+                sw, payload.email.strip(), payload.phone.strip(), payload.restricted_message.strip()
+            )
+            output = await asyncio.to_thread(apply_motd, sw, banner_text, payload.save_config, operator)
+            results.append({"switch_id": sw.id, "hostname": sw.hostname, "management_ip": sw.management_ip, "success": True, "banner": banner_text, "output": output})
+            audit(db, sw, "banner.motd", command="banner motd", message=f"Contato: {payload.email or '-'} / {payload.phone or '-'}", **identity)
         except Exception as exc:
-            results.append({"switch_id": sw.id, "hostname": sw.hostname, "success": False, "error": str(exc)}); audit(db, sw, "banner.motd", command="banner motd", success=False, message=exc)
+            results.append({"switch_id": sw.id, "hostname": sw.hostname, "management_ip": sw.management_ip, "success": False, "error": str(exc)})
+            audit(db, sw, "banner.motd", command="banner motd", success=False, message=exc, **identity)
     return results
 
 
 @app.post("/api/switches/{switch_id}/backups")
-async def backup_create(switch_id: int, db: Session = Depends(get_db)):
+async def backup_create(switch_id: int, request: Request, db: Session = Depends(get_db)):
     sw = db.get(Switch, switch_id)
     if not sw: raise HTTPException(404, "Switch not found")
+    operator = operator_context(request, required=True); identity = audit_identity(request, operator)
     try:
-        path = await asyncio.to_thread(create_backup, sw); audit(db, sw, "backup.create", command="show running-config"); return {"ok": True, "name": path.name}
+        path = await asyncio.to_thread(create_backup, sw, operator); audit(db, sw, "backup.create", command="show running-config", **identity); return {"ok": True, "name": path.name}
     except Exception as exc:
-        audit(db, sw, "backup.create", command="show running-config", success=False, message=exc); raise HTTPException(502, str(exc))
+        audit(db, sw, "backup.create", command="show running-config", success=False, message=exc, **identity); raise HTTPException(502, str(exc))
 
 
 @app.get("/api/switches/{switch_id}/backups")
@@ -754,7 +858,7 @@ def delete_shortcut(shortcut_id: int, db: Session = Depends(get_db)):
 def audit_logs(limit: int = 100, db: Session = Depends(get_db)):
     limit = min(max(limit, 1), 500)
     rows = db.scalars(select(AuditLog).order_by(desc(AuditLog.id)).limit(limit)).all()
-    return [{"id": r.id, "hostname": r.hostname, "action": r.action, "command": r.command, "success": r.success, "message": r.message, "created_at": r.created_at} for r in rows]
+    return [{"id": r.id, "hostname": r.hostname, "portal_user": r.portal_user, "operator_user": r.operator_user, "action": r.action, "command": r.command, "success": r.success, "message": r.message, "created_at": r.created_at} for r in rows]
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

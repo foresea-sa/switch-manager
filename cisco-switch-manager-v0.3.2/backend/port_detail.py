@@ -77,9 +77,9 @@ def _parse_switchport(raw):
     }
 
 
-def get_port_detail(sw, interface: str):
+def get_port_detail(sw, interface: str, credentials=None):
     interface = validate_interface(interface)
-    conn = connect(sw)
+    conn = connect(sw, credentials)
     try:
         raw_interface = _run_on_connection(conn, f"show interfaces {interface}")
         raw_mac = _run_on_connection(conn, f"show mac address-table interface {interface}")

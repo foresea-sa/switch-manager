@@ -8,9 +8,6 @@ class SwitchCreate(BaseModel):
     platform: str = "cisco_ios"
     protocol: str = "telnet"
     port: int | None = None
-    username: str = ""
-    password: str = ""
-    secret: str = ""
     snmp_version: str = "v2c"
     snmp_port: int = 161
     snmp_community: str = ""
@@ -30,9 +27,6 @@ class SwitchUpdate(BaseModel):
     platform: str | None = None
     protocol: str | None = None
     port: int | None = None
-    username: str | None = None
-    password: str | None = None
-    secret: str | None = None
     snmp_version: str | None = None
     snmp_port: int | None = None
     snmp_community: str | None = None
@@ -56,7 +50,11 @@ class MacSearchRequest(BaseModel):
 
 class BannerRequest(BaseModel):
     switch_ids: list[int] = Field(min_length=1)
-    banner: str = Field(min_length=1, max_length=4000)
+    email: str = Field(default="", max_length=254)
+    phone: str = Field(default="", max_length=80)
+    restricted_message: str = Field(default="", max_length=2000)
+    # Mantido para compatibilidade com clientes da v0.3.1.
+    banner: str | None = Field(default=None, max_length=4000)
     save_config: bool = False
 
 
@@ -79,7 +77,10 @@ class DiscoveryRequest(BaseModel):
     snmp_v3_priv_protocol: str = "AES"
     protocol: str = "telnet"
     cli_port: int | None = None
-    username: str = ""
-    password: str = ""
-    secret: str = ""
     add_found: bool = False
+
+
+class OperatorSessionRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=1, max_length=512)
+    secret: str = Field(default="", max_length=512)
