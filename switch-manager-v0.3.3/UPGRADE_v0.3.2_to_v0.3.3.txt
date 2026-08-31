@@ -1,0 +1,31 @@
+Switch Manager - Atualizacao v0.3.2 -> v0.3.3
+
+1. Pare a versao anterior na pasta onde ela esta instalada:
+
+   docker compose down
+
+2. Faca backup do diretorio data e do .env.
+
+3. Extraia switch-manager-v0.3.3.zip.
+
+4. Copie os dados da versao anterior:
+
+   cp -a /CAMINHO/DA/VERSAO_ANTERIOR/data/. switch-manager-v0.3.3/data/
+   cp /CAMINHO/DA/VERSAO_ANTERIOR/.env switch-manager-v0.3.3/.env
+
+5. Suba a nova versao:
+
+   cd switch-manager-v0.3.3
+   docker compose up -d --build
+
+6. Valide:
+
+   docker ps
+   curl -I http://127.0.0.1:8086
+
+O novo container chama-se switch-manager.
+
+IMPORTANTE
+- Preserve data/csm.db e data/secret.key.
+- Importacao/exportacao TXT nao transporta senhas, communities ou chaves SNMPv3.
+- O importador atualiza registros quando encontra o mesmo hostname ou IP.
