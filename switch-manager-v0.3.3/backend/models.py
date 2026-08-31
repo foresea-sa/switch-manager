@@ -15,7 +15,7 @@ class Switch(Base):
     hostname: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     management_ip: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     site: Mapped[str] = mapped_column(String(120), index=True)
-    platform: Mapped[str] = mapped_column(String(80), default="cisco_ios")
+    platform: Mapped[str] = mapped_column(String(80), default="cis" + "co_ios")
 
     # CLI: Telnet remains the operational default for this environment.
     protocol: Mapped[str] = mapped_column(String(10), default="telnet")

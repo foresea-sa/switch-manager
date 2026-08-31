@@ -34,9 +34,9 @@ IF_SPEED = "1.3.6.1.2.1.2.2.1.5"
 IF_HIGH_SPEED = "1.3.6.1.2.1.31.1.1.1.15"
 IF_IN_ERRORS = "1.3.6.1.2.1.2.2.1.14"
 IF_OUT_ERRORS = "1.3.6.1.2.1.2.2.1.20"
-CISCO_CPU_5S = "1.3.6.1.4.1.9.9.109.1.1.1.1.3"
-CISCO_MEM_USED = "1.3.6.1.4.1.9.9.48.1.1.1.5"
-CISCO_MEM_FREE = "1.3.6.1.4.1.9.9.48.1.1.1.6"
+VENDOR_CPU_5S = "1.3.6.1.4.1.9.9.109.1.1.1.1.3"
+VENDOR_MEM_USED = "1.3.6.1.4.1.9.9.48.1.1.1.5"
+VENDOR_MEM_FREE = "1.3.6.1.4.1.9.9.48.1.1.1.6"
 ENT_PHYSICAL_NAME = "1.3.6.1.2.1.47.1.1.1.1.7"
 ENT_SENSOR_TYPE = "1.3.6.1.2.1.99.1.1.1.1"
 ENT_SENSOR_SCALE = "1.3.6.1.2.1.99.1.1.1.2"
@@ -257,7 +257,7 @@ async def snmp_poe(sw):
 async def snmp_metrics(sw):
     health = await snmp_health(sw)
     cpu_values, used_values, free_values = [], [], []
-    for oid, target in [(CISCO_CPU_5S, cpu_values), (CISCO_MEM_USED, used_values), (CISCO_MEM_FREE, free_values)]:
+    for oid, target in [(VENDOR_CPU_5S, cpu_values), (VENDOR_MEM_USED, used_values), (VENDOR_MEM_FREE, free_values)]:
         try:
             for _, value in await snmp_walk(sw, oid):
                 try:

@@ -5,7 +5,7 @@ class SwitchCreate(BaseModel):
     hostname: str = Field(min_length=1, max_length=120)
     management_ip: str = Field(min_length=1, max_length=64)
     site: str = Field(min_length=1, max_length=120)
-    platform: str = "cisco_ios"
+    platform: str = "ios"
     protocol: str = "telnet"
     port: int | None = None
     snmp_version: str = "v2c"
@@ -37,6 +37,11 @@ class SwitchUpdate(BaseModel):
     snmp_v3_priv_protocol: str | None = None
     monitor_method: str | None = None
     notes: str | None = None
+
+
+class InventoryImportRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=1_000_000)
+    mode: str = Field(default="upsert", max_length=20)
 
 
 class CommandRequest(BaseModel):

@@ -1,0 +1,1 @@
+hostname;management_ip;site;platform;protocol;port;snmp_version;snmp_port;monitor_method;model;serial;software_version;notes

@@ -27,18 +27,18 @@ def _cleanup_locked(now=None):
 def validate_username(username: str) -> str:
     value = (username or "").strip()
     if not value:
-        raise ValueError("Informe o usuario administrativo Cisco")
+        raise ValueError("Informe o usuario administrativo de rede")
     if USERNAME_PREFIX and not value.lower().startswith(USERNAME_PREFIX.lower()):
-        raise ValueError(f"O usuario Cisco deve iniciar com {USERNAME_PREFIX}")
+        raise ValueError(f"O usuario administrativo deve iniciar com {USERNAME_PREFIX}")
     if len(value) > 120:
-        raise ValueError("Usuario Cisco muito longo")
+        raise ValueError("Usuario administrativo muito longo")
     return value
 
 
 def create_session(username: str, password: str, secret: str = ""):
     username = validate_username(username)
     if not password:
-        raise ValueError("Informe a senha do usuario Cisco")
+        raise ValueError("Informe a senha do usuario administrativo")
     token = secrets.token_urlsafe(32)
     now = _now()
     item = {

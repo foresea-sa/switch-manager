@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Cisco Switch Manager</title>
+  <title>Switch Manager</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
 <div class="app-shell">
   <aside class="sidebar">
-    <div class="brand"><div class="brand-mark">CSM</div><div><strong>Cisco Switch Manager</strong><small>Network Operations</small></div></div>
+    <div class="brand"><div class="brand-mark">SM</div><div><strong>Switch Manager</strong><small>Network Operations</small></div></div>
     <nav id="nav">
       <button class="nav-btn active" data-view="dashboard">Dashboard</button>
       <button class="nav-btn" data-view="inventory">Inventário</button>
@@ -23,13 +23,13 @@
       <button class="nav-btn" data-view="shortcuts">Atalhos</button>
       <button class="nav-btn" data-view="audit">Auditoria</button>
     </nav>
-    <div class="sidebar-foot">v0.3.2 · SNMPv2/v3 · Telnet/SSH · credencial individual</div>
+    <div class="sidebar-foot">v0.3.3 · SNMPv2/v3 · Telnet/SSH · credencial individual</div>
   </aside>
 
   <main class="content">
     <header class="topbar">
-      <div><h1 id="pageTitle">Dashboard</h1><p id="pageSubtitle">Visão geral do parque Cisco</p></div>
-      <div class="top-actions"><span id="globalMessage" class="muted"></span><span id="operatorStatus" class="operator-status inactive">Cisco: não autenticado</span><button id="operatorCredentialBtn" class="btn secondary">Credencial Cisco</button><button id="refreshStatusBtn" class="btn secondary">Atualizar status</button></div>
+      <div><h1 id="pageTitle">Dashboard</h1><p id="pageSubtitle">Visão geral do parque de switches</p></div>
+      <div class="top-actions"><span id="globalMessage" class="muted"></span><span id="operatorStatus" class="operator-status inactive">CLI: não autenticado</span><button id="operatorCredentialBtn" class="btn secondary">Credencial de rede</button><button id="refreshStatusBtn" class="btn secondary">Atualizar status</button></div>
     </header>
 
     <section class="view active" id="view-dashboard">
@@ -40,13 +40,14 @@
 
     <section class="view" id="view-inventory">
       <div class="panel">
-        <div class="panel-head"><div><h2>Cadastrar / editar switch</h2><p>Padrão do ambiente: SNMPv2c + Telnet</p></div><span id="inventoryCount" class="badge"></span></div>
+        <div class="panel-head"><div><h2>Cadastrar / editar switch</h2><p>Padrão do ambiente: SNMPv2c + Telnet</p></div><div class="inventory-head-actions"><span id="inventoryCount" class="badge"></span><button id="inventoryTemplateBtn" class="btn secondary" type="button">Modelo TXT</button><button id="inventoryExportBtn" class="btn secondary" type="button">Exportar TXT</button><label class="btn secondary file-btn" for="inventoryImportFile">Importar TXT</label><input id="inventoryImportFile" type="file" accept=".txt,text/plain" hidden></div></div>
+        <div id="inventoryImportResult" class="hidden"></div>
         <form id="switchForm" class="form-grid">
           <input type="hidden" id="switchId">
           <label>Hostname<input id="hostname" required></label>
           <label>IP de gerenciamento<input id="managementIp" required placeholder="10.10.10.10"></label>
           <label>Localidade<input id="site" required placeholder="ODN1, N06, Macaé..."></label>
-          <label>Plataforma<select id="platform"><option value="cisco_ios">Cisco IOS / IOS-XE</option></select></label>
+          <label>Plataforma<select id="platform"><option value="ios">IOS / IOS-XE</option></select></label>
           <label>Terminal<select id="protocol"><option value="telnet" selected>Telnet</option><option value="ssh">SSH</option></select></label>
           <label>Porta CLI<input id="port" type="number" value="23" min="1" max="65535"></label>
           <div class="info-box span-2"><strong>Credencial CLI individual</strong><span>Usuário e senha Telnet/SSH não são gravados no switch. Cada integrante ativa sua sessão <code>adm-</code> no topo da aplicação antes das operações CLI.</span></div>
@@ -68,7 +69,7 @@
     </section>
 
     <section class="view" id="view-discovery">
-      <div class="panel"><div class="panel-head"><div><h2>Descoberta automática via SNMP</h2><p>Varre uma rede IPv4 de até 1024 endereços e identifica equipamentos Cisco</p></div></div>
+      <div class="panel"><div class="panel-head"><div><h2>Descoberta automática via SNMP</h2><p>Varre uma rede IPv4 de até 1024 endereços e identifica switches compatíveis</p></div></div>
         <form id="discoveryForm" class="form-grid">
           <label>Rede CIDR<input id="discoverNetwork" required placeholder="10.10.20.0/24"></label>
           <label>Localidade para cadastro<input id="discoverSite" value="Descoberta"></label>
@@ -151,13 +152,13 @@
     </section>
 
     <section class="view" id="view-terminal">
-      <div class="panel"><div class="panel-head"><div><h2>Terminal</h2><p>Sessão persistente Telnet/SSH pelo backend</p></div><div class="terminal-controls"><select id="terminalSwitch"></select><button id="terminalConnect" class="btn primary">Conectar</button><button id="terminalDisconnect" class="btn danger" disabled>Desconectar</button></div></div><div id="shortcutBar" class="chips"></div><pre id="terminalOutput" class="terminal-output">Cisco Switch Manager v0.3.2
+      <div class="panel"><div class="panel-head"><div><h2>Terminal</h2><p>Sessão persistente Telnet/SSH pelo backend</p></div><div class="terminal-controls"><select id="terminalSwitch"></select><button id="terminalConnect" class="btn primary">Conectar</button><button id="terminalDisconnect" class="btn danger" disabled>Desconectar</button></div></div><div id="shortcutBar" class="chips"></div><pre id="terminalOutput" class="terminal-output">Switch Manager v0.3.3
 Selecione um switch e clique em Conectar.
 </pre><form id="terminalForm" class="terminal-form"><input id="terminalCommand" autocomplete="off" placeholder="show interfaces status"><button class="btn primary">Executar</button></form><div class="actions"><button id="cdpBtn" class="btn secondary">CDP</button><button id="lldpBtn" class="btn secondary">LLDP</button><button id="bothBtn" class="btn secondary">CDP + LLDP</button></div><div id="neighborResults"></div></div>
     </section>
 
     <section class="view" id="view-backups">
-      <div class="panel"><div class="panel-head"><div><h2>Backups de running-config</h2><p>Backup manual usa sua sessão Cisco. O automático só funciona se uma conta técnica de serviço for configurada explicitamente.</p></div><div><select id="backupSwitch" class="select-wide"></select> <button id="createBackupBtn" class="btn primary">Gerar backup agora</button></div></div><div id="backupList"></div></div>
+      <div class="panel"><div class="panel-head"><div><h2>Backups de running-config</h2><p>Backup manual usa sua sessão CLI individual. O automático só funciona se uma conta técnica de serviço for configurada explicitamente.</p></div><div><select id="backupSwitch" class="select-wide"></select> <button id="createBackupBtn" class="btn primary">Gerar backup agora</button></div></div><div id="backupList"></div></div>
       <div class="panel"><div class="panel-head"><div><h2>Comparar configurações</h2><p>Diff entre dois backups do mesmo switch</p></div></div><div class="inline-form"><select id="diffOld"></select><select id="diffNew"></select><button id="compareBackupsBtn" class="btn secondary">Comparar</button></div><pre id="backupDiff" class="diff-output">Selecione dois backups.</pre></div>
     </section>
 
@@ -166,22 +167,22 @@ Selecione um switch e clique em Conectar.
     </section>
 
     <section class="view" id="view-audit">
-      <div class="panel"><div class="panel-head"><div><h2>Auditoria</h2><p>Comandos e alterações executadas pelo sistema</p></div><button id="reloadAudit" class="btn secondary">Atualizar</button></div><div class="table-wrap"><table><thead><tr><th>Data</th><th>Usuário Cisco</th><th>Switch</th><th>Ação</th><th>Comando</th><th>Resultado</th></tr></thead><tbody id="auditTable"></tbody></table></div></div>
+      <div class="panel"><div class="panel-head"><div><h2>Auditoria</h2><p>Comandos e alterações executadas pelo sistema</p></div><button id="reloadAudit" class="btn secondary">Atualizar</button></div><div class="table-wrap"><table><thead><tr><th>Data</th><th>Usuário CLI</th><th>Switch</th><th>Ação</th><th>Comando</th><th>Resultado</th></tr></thead><tbody id="auditTable"></tbody></table></div></div>
     </section>
   </main>
 </div>
 <dialog id="operatorDialog" class="operator-dialog">
   <form id="operatorForm" method="dialog">
     <div class="dialog-head">
-      <div><h2>Credencial Cisco</h2><p>Use seu usuário administrativo individual para Telnet/SSH.</p></div>
+      <div><h2>Credencial de rede</h2><p>Use seu usuário administrativo individual para Telnet/SSH.</p></div>
       <button id="operatorDialogClose" class="icon-btn" type="button" aria-label="Fechar">×</button>
     </div>
-    <label>Usuário Cisco<input id="operatorUsername" required autocomplete="username" placeholder="adm-seunome"></label>
+    <label>Usuário administrativo<input id="operatorUsername" required autocomplete="username" placeholder="adm-seunome"></label>
     <label>Senha<input id="operatorPassword" type="password" required autocomplete="current-password"></label>
     <label>Enable secret <span class="muted">(opcional)</span><input id="operatorSecret" type="password" autocomplete="current-password"></label>
     <div class="security-note">A senha é mantida somente na memória do backend durante a sessão e não é gravada no SQLite. Em produção, use HTTPS.</div>
     <div class="dialog-actions">
-      <button id="operatorLogoutBtn" class="btn danger hidden" type="button">Encerrar sessão Cisco</button>
+      <button id="operatorLogoutBtn" class="btn danger hidden" type="button">Encerrar sessão CLI</button>
       <button class="btn primary" type="submit">Ativar sessão</button>
     </div>
   </form>

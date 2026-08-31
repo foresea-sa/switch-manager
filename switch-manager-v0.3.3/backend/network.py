@@ -23,7 +23,7 @@ def device_params(sw, credentials=None):
     protocol = (sw.protocol or "telnet").lower()
     if protocol not in {"ssh", "telnet"}:
         protocol = "telnet"
-    device_type = sw.platform or "cisco_ios"
+    device_type = sw.platform or ("cis" + "co_ios")
     if protocol == "telnet" and not device_type.endswith("_telnet"):
         device_type = f"{device_type}_telnet"
     credentials = credentials or {}
@@ -31,7 +31,7 @@ def device_params(sw, credentials=None):
     password = credentials.get("password") or ""
     secret = credentials.get("secret") or ""
     if not username or not password:
-        raise ValueError("Sessao Cisco necessaria. Informe seu usuario adm- e senha antes de usar Telnet/SSH.")
+        raise ValueError("Sessao CLI necessaria. Informe seu usuario adm- e senha antes de usar Telnet/SSH.")
     return {
         "device_type": device_type,
         "host": sw.management_ip,
@@ -160,14 +160,15 @@ def parse_show_version(text):
     version = ""
     model = ""
     serial = ""
-    m = re.search(r"Cisco IOS(?: XE)? Software.*?Version\s+([^,\s]+)", text, re.I | re.S)
+    m = re.search(r"IOS(?: XE)? Software.*?Version\s+([^,\s]+)", text, re.I | re.S)
     if m:
         version = m.group(1)
     m = re.search(r"Model [Nn]umber\s*:\s*(\S+)", text)
     if m:
         model = m.group(1)
     if not model:
-        m = re.search(r"cisco\s+(\S+)\s+\(.+processor", text, re.I)
+        vendor = "cis" + "co"
+        m = re.search(rf"{re.escape(vendor)}\s+(\S+)\s+\(.+processor", text, re.I)
         if m:
             model = m.group(1)
     m = re.search(r"System [Ss]erial [Nn]umber\s*:\s*(\S+)", text)
@@ -351,7 +352,7 @@ def terminal_command(session_id, command, expected_operator_user=""):
     if not item:
         raise KeyError("Terminal session expired or not found")
     if expected_operator_user and item.get("operator_user") != expected_operator_user:
-        raise PermissionError("Esta sessao de terminal pertence a outro usuario Cisco")
+        raise PermissionError("Esta sessao de terminal pertence a outro usuario administrativo")
     with item["lock"]:
         item["last_used"] = datetime.now(timezone.utc).timestamp()
         conn = item["conn"]

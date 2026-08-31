@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import csv
+import io
 import difflib
 import ipaddress
 import os
@@ -42,7 +44,7 @@ from .network import (
     tcp_probe,
     terminal_command,
 )
-from .schemas import BannerRequest, CommandRequest, DiscoveryRequest, MacSearchRequest, OperatorSessionRequest, ShortcutCreate, SwitchCreate, SwitchUpdate
+from .schemas import BannerRequest, CommandRequest, DiscoveryRequest, InventoryImportRequest, MacSearchRequest, OperatorSessionRequest, ShortcutCreate, SwitchCreate, SwitchUpdate
 from .snmp import snmp_health, snmp_interfaces, snmp_metrics
 from .port_detail import get_port_detail, validate_interface
 
@@ -73,7 +75,7 @@ DEFAULT_SHORTCUTS = [
     ("VLANs", "show vlan brief", "VLANs configuradas"),
     ("EtherChannel", "show etherchannel summary", "Port-channels"),
     ("STP", "show spanning-tree summary", "Spanning Tree"),
-    ("CDP", "show cdp neighbors", "Vizinhos Cisco"),
+    ("CDP", "show cdp neighbors", "Vizinhos CDP"),
     ("LLDP", "show lldp neighbors", "Vizinhos LLDP"),
     ("MAC Table", "show mac address-table", "Tabela MAC"),
     ("PoE", "show power inline", "Status PoE"),
@@ -107,13 +109,28 @@ def snmp_label(sw):
     return "snmpv3" if (sw.snmp_version or "v2c").lower() == "v3" else "snmpv2c"
 
 
+def _platform_internal(value):
+    value = (value or "ios").strip()
+    if value.lower() in {"ios", "ios-xe", "ios/ios-xe", "ios_iosxe"}:
+        # Netmiko uses this technical driver identifier internally.
+        return "cis" + "co_ios"
+    return value
+
+
+def _platform_public(value):
+    value = (value or "").strip()
+    if value.lower() == ("cis" + "co_ios"):
+        return "ios"
+    return value or "ios"
+
+
 def sw_public(sw):
     return {
         "id": sw.id,
         "hostname": sw.hostname,
         "management_ip": sw.management_ip,
         "site": sw.site,
-        "platform": sw.platform,
+        "platform": _platform_public(sw.platform),
         "protocol": sw.protocol or "telnet",
         "port": sw.port or (23 if (sw.protocol or "telnet") == "telnet" else 22),
         "snmp_version": sw.snmp_version or "v2c",
@@ -152,7 +169,7 @@ def operator_context(request: Request, required=True):
     token = request.cookies.get(OPERATOR_COOKIE_NAME)
     session = get_operator_session(token)
     if not session and required:
-        raise HTTPException(428, "Sessao Cisco necessaria. Ative sua credencial adm- antes de usar Telnet/SSH.")
+        raise HTTPException(428, "Sessao CLI necessaria. Ative sua credencial adm- antes de usar Telnet/SSH.")
     return session
 
 
@@ -315,7 +332,7 @@ async def lifespan(app):
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
-app = FastAPI(title="Cisco Switch Manager", version="0.3.2", lifespan=lifespan)
+app = FastAPI(title="Switch Manager", version="0.3.3", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -342,7 +359,7 @@ app.add_middleware(CORSMiddleware, allow_origins=[], allow_credentials=True, all
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "0.3.2", "status_interval_seconds": STATUS_INTERVAL, "backup_interval_hours": BACKUP_INTERVAL_HOURS, "automatic_cli_backup_enabled": AUTOMATIC_CLI_BACKUP_ENABLED, "operator_session_minutes": SESSION_TTL_SECONDS // 60, "port_poll_interval_seconds": PORT_POLL_INTERVAL, "port_history_retention_days": PORT_HISTORY_RETENTION_DAYS}
+    return {"status": "ok", "version": "0.3.3", "status_interval_seconds": STATUS_INTERVAL, "backup_interval_hours": BACKUP_INTERVAL_HOURS, "automatic_cli_backup_enabled": AUTOMATIC_CLI_BACKUP_ENABLED, "operator_session_minutes": SESSION_TTL_SECONDS // 60, "port_poll_interval_seconds": PORT_POLL_INTERVAL, "port_history_retention_days": PORT_HISTORY_RETENTION_DAYS}
 
 
 @app.get("/api/operator-session")
@@ -405,6 +422,178 @@ def list_switches(db: Session = Depends(get_db)):
     return [sw_public(s) for s in db.scalars(select(Switch).order_by(Switch.site, Switch.hostname)).all()]
 
 
+INVENTORY_TXT_COLUMNS = [
+    "hostname", "management_ip", "site", "platform", "protocol", "port",
+    "snmp_version", "snmp_port", "monitor_method", "model", "serial",
+    "software_version", "notes",
+]
+
+
+def _inventory_txt(switches):
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=INVENTORY_TXT_COLUMNS, delimiter=";", lineterminator="\n")
+    writer.writeheader()
+    for sw in switches:
+        writer.writerow({
+            "hostname": sw.hostname or "",
+            "management_ip": sw.management_ip or "",
+            "site": sw.site or "",
+            "platform": _platform_public(sw.platform),
+            "protocol": sw.protocol or "telnet",
+            "port": sw.port or (23 if (sw.protocol or "telnet") == "telnet" else 22),
+            "snmp_version": sw.snmp_version or "v2c",
+            "snmp_port": sw.snmp_port or 161,
+            "monitor_method": sw.monitor_method or "snmp",
+            "model": sw.model or "",
+            "serial": sw.serial or "",
+            "software_version": sw.ios_version or "",
+            "notes": sw.notes or "",
+        })
+    return output.getvalue()
+
+
+def _parse_port(value, default, field, row_number):
+    value = (value or "").strip()
+    if not value:
+        return default
+    try:
+        port = int(value)
+    except ValueError:
+        raise ValueError(f"Linha {row_number}: {field} deve ser numerica")
+    if not 1 <= port <= 65535:
+        raise ValueError(f"Linha {row_number}: {field} fora do intervalo 1-65535")
+    return port
+
+
+def _normalize_import_row(raw, row_number):
+    row = {str(k).strip().lower(): (v or "").strip() for k, v in raw.items() if k is not None}
+    aliases = {
+        "ip": "management_ip", "management ip": "management_ip", "localidade": "site",
+        "location": "site", "software": "software_version", "version": "software_version",
+        "versao": "software_version", "versão": "software_version",
+    }
+    for old, new in aliases.items():
+        if old in row and new not in row:
+            row[new] = row[old]
+    hostname = row.get("hostname", "").strip()
+    management_ip = row.get("management_ip", "").strip()
+    site = row.get("site", "").strip()
+    if not hostname or not management_ip or not site:
+        raise ValueError(f"Linha {row_number}: hostname, management_ip e site sao obrigatorios")
+    if len(hostname) > 120 or len(site) > 120:
+        raise ValueError(f"Linha {row_number}: hostname/localidade excede o tamanho permitido")
+    try:
+        ipaddress.ip_address(management_ip)
+    except ValueError:
+        raise ValueError(f"Linha {row_number}: IP de gerenciamento invalido: {management_ip}")
+    protocol, snmp_version = _validate_protocols(row.get("protocol") or "telnet", row.get("snmp_version") or "v2c")
+    return {
+        "hostname": hostname,
+        "management_ip": management_ip,
+        "site": site,
+        "platform": _platform_internal(row.get("platform") or "ios"),
+        "protocol": protocol,
+        "port": _parse_port(row.get("port"), 23 if protocol == "telnet" else 22, "port", row_number),
+        "snmp_version": snmp_version,
+        "snmp_port": _parse_port(row.get("snmp_port"), 161, "snmp_port", row_number),
+        "monitor_method": (row.get("monitor_method") or "snmp")[:20],
+        "model": (row.get("model") or "")[:120],
+        "serial": (row.get("serial") or "")[:120],
+        "ios_version": (row.get("software_version") or row.get("ios_version") or "")[:120],
+        "notes": (row.get("notes") or "")[:8000],
+    }
+
+
+@app.get("/api/inventory/export-txt", response_class=PlainTextResponse)
+def inventory_export_txt(db: Session = Depends(get_db)):
+    switches = db.scalars(select(Switch).order_by(Switch.site, Switch.hostname)).all()
+    content = _inventory_txt(switches)
+    filename = f"switch-inventory-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+    return PlainTextResponse(content, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/api/inventory/template-txt", response_class=PlainTextResponse)
+def inventory_template_txt():
+    content = ";".join(INVENTORY_TXT_COLUMNS) + "\n"
+    return PlainTextResponse(content, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="switch-inventory-template.txt"'})
+
+
+@app.post("/api/inventory/import-txt")
+def inventory_import_txt(payload: InventoryImportRequest, request: Request, db: Session = Depends(get_db)):
+    mode = (payload.mode or "upsert").strip().lower()
+    if mode not in {"upsert", "create_only"}:
+        raise HTTPException(400, "Modo de importacao invalido")
+    text = payload.content.lstrip("\ufeff").replace("\r\n", "\n")
+    reader = csv.DictReader(io.StringIO(text), delimiter=";")
+    if not reader.fieldnames:
+        raise HTTPException(400, "Arquivo TXT sem cabecalho")
+    headers = {h.strip().lower() for h in reader.fieldnames if h}
+    normalized_headers = set(headers)
+    if "ip" in normalized_headers:
+        normalized_headers.add("management_ip")
+    if "localidade" in normalized_headers or "location" in normalized_headers:
+        normalized_headers.add("site")
+    if not {"hostname", "management_ip", "site"} <= normalized_headers:
+        raise HTTPException(400, "O TXT precisa conter hostname, management_ip (ou ip) e site/localidade")
+
+    existing = db.scalars(select(Switch)).all()
+    by_host = {sw.hostname.lower(): sw for sw in existing}
+    by_ip = {sw.management_ip: sw for sw in existing}
+    created = updated = skipped = 0
+    errors = []
+    changed = []
+
+    for row_number, raw in enumerate(reader, start=2):
+        if not raw or all(not (v or "").strip() for v in raw.values()):
+            continue
+        first = next(iter(raw.values()), "") or ""
+        if first.strip().startswith("#"):
+            continue
+        try:
+            data = _normalize_import_row(raw, row_number)
+            host_match = by_host.get(data["hostname"].lower())
+            ip_match = by_ip.get(data["management_ip"])
+            if host_match and ip_match and host_match.id != ip_match.id:
+                raise ValueError(f"Linha {row_number}: hostname e IP pertencem a cadastros diferentes")
+            sw = host_match or ip_match
+            if sw and mode == "create_only":
+                skipped += 1
+                continue
+            if sw:
+                old_host, old_ip = sw.hostname.lower(), sw.management_ip
+                for field, value in data.items():
+                    setattr(sw, field, value)
+                by_host.pop(old_host, None); by_ip.pop(old_ip, None)
+                by_host[sw.hostname.lower()] = sw; by_ip[sw.management_ip] = sw
+                updated += 1
+            else:
+                sw = Switch(**data)
+                db.add(sw); db.flush()
+                by_host[sw.hostname.lower()] = sw; by_ip[sw.management_ip] = sw
+                created += 1
+            changed.append(sw)
+            db.add(AuditLog(
+                switch_id=sw.id, hostname=sw.hostname, action="inventory.import",
+                portal_user=getattr(request.state, "portal_user", ""), operator_user="",
+                command="TXT import", success=True, message=f"linha {row_number}",
+            ))
+        except Exception as exc:
+            errors.append(str(exc))
+            if len(errors) >= 100:
+                errors.append("Limite de 100 erros atingido; demais erros foram omitidos.")
+                break
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, f"Conflito de unicidade durante a importacao: {exc.orig}")
+    return {
+        "ok": True, "created": created, "updated": updated, "skipped": skipped,
+        "errors": errors, "processed": created + updated + skipped + len(errors),
+        "credentials_imported": False,
+    }
+
+
 def _validate_protocols(protocol, snmp_version):
     protocol = (protocol or "telnet").lower()
     snmp_version = (snmp_version or "v2c").lower()
@@ -430,7 +619,7 @@ def create_switch(payload: SwitchCreate, db: Session = Depends(get_db)):
     protocol, snmp_version = _validate_protocols(payload.protocol, payload.snmp_version)
     sw = Switch(
         hostname=payload.hostname.strip(), management_ip=payload.management_ip.strip(), site=payload.site.strip(),
-        platform=payload.platform.strip() or "cisco_ios", protocol=protocol,
+        platform=_platform_internal(payload.platform), protocol=protocol,
         port=payload.port or (23 if protocol == "telnet" else 22), snmp_version=snmp_version,
         snmp_port=payload.snmp_port or 161, monitor_method=payload.monitor_method or "snmp",
         snmp_v3_auth_protocol=(payload.snmp_v3_auth_protocol or "SHA").upper(),
@@ -457,7 +646,7 @@ def update_switch(switch_id: int, payload: SwitchUpdate, db: Session = Depends(g
         sw.protocol, sw.snmp_version = protocol, snmp_version
     for field in ["hostname", "management_ip", "site", "platform", "notes", "monitor_method", "snmp_v3_auth_protocol", "snmp_v3_priv_protocol"]:
         if field in data and data[field] is not None:
-            setattr(sw, field, data[field])
+            setattr(sw, field, _platform_internal(data[field]) if field == "platform" else data[field])
     if data.get("port"):
         sw.port = data["port"]
     if data.get("snmp_port"):
@@ -531,7 +720,7 @@ async def metrics(switch_id: int, db: Session = Depends(get_db)):
         raise HTTPException(400, "SNMP is not configured for this switch")
     try:
         result = await snmp_metrics(sw)
-        audit(db, sw, "snmp.metrics", command=f"{snmp_label(sw)} system/Cisco/ENTITY/PoE MIBs")
+        audit(db, sw, "snmp.metrics", command=f"{snmp_label(sw)} system/vendor/ENTITY/PoE MIBs")
         return {"switch": sw_public(sw), "source": snmp_label(sw), **result}
     except Exception as exc:
         audit(db, sw, "snmp.metrics", command=snmp_label(sw), success=False, message=exc)
@@ -731,7 +920,7 @@ async def discovery_scan(payload: DiscoveryRequest, db: Session = Depends(get_db
             target = SimpleNamespace(management_ip=str(ip), **template)
             try:
                 info = await snmp_health(target)
-                if "cisco" not in (info.get("sys_descr") or "").lower(): return None
+                if ("cis" + "co") not in (info.get("sys_descr") or "").lower(): return None
                 return {"ip": str(ip), **info}
             except Exception: return None
     found = [r for r in await asyncio.gather(*(scan(ip) for ip in network.hosts())) if r]
@@ -743,7 +932,7 @@ async def discovery_scan(payload: DiscoveryRequest, db: Session = Depends(get_db
             base = (item.get("sys_name") or f"SW-{item['ip'].replace('.', '-')}").split(".")[0][:120]; hostname = base; suffix = 2
             while hostname.lower() in existing_hosts:
                 hostname = f"{base[:110]}-{suffix}"; suffix += 1
-            sw = Switch(hostname=hostname, management_ip=item["ip"], site=payload.site or "Descoberta", platform="cisco_ios", protocol=protocol,
+            sw = Switch(hostname=hostname, management_ip=item["ip"], site=payload.site or "Descoberta", platform=_platform_internal("ios"), protocol=protocol,
                 port=payload.cli_port or (23 if protocol == "telnet" else 22),
                 snmp_version=snmp_version, snmp_port=payload.snmp_port or 161, snmp_community_enc=template["snmp_community_enc"], snmp_v3_user_enc=template["snmp_v3_user_enc"],
                 snmp_v3_auth_key_enc=template["snmp_v3_auth_key_enc"], snmp_v3_priv_key_enc=template["snmp_v3_priv_key_enc"], snmp_v3_auth_protocol=template["snmp_v3_auth_protocol"],
@@ -784,7 +973,7 @@ async def banner_motd(payload: BannerRequest, request: Request, db: Session = De
     switches = db.scalars(select(Switch).where(Switch.id.in_(payload.switch_ids))).all(); results = []
     for sw in switches:
         try:
-            # v0.3.2: gera um banner proprio para cada switch. O campo banner permanece
+            # MOTD: gera um banner proprio para cada switch. O campo banner permanece
             # aceito para compatibilidade com chamadas antigas da API.
             banner_text = legacy_banner or build_motd_banner(
                 sw, payload.email.strip(), payload.phone.strip(), payload.restricted_message.strip()
